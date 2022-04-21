@@ -1,12 +1,14 @@
-//SPDX-License-Identifier: Unlicense
+// SPDX-License-Identifier: MIT
+
 pragma solidity 0.6.12;
 
+import "@openzeppelin/contracts-upgradeable/proxy/Initializable.sol";
 import "hardhat/console.sol";
 
-contract Greeter {
+contract ProxyTest is Initializable {
     string private greeting;
 
-    constructor(string memory _greeting) public {
+    function initialize(string memory _greeting) public initializer {
         console.log("Deploying a Greeter with greeting:", _greeting);
         greeting = _greeting;
     }

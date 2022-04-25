@@ -31,7 +31,6 @@ pragma experimental ABIEncoderV2;
 * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-* SOFTWARE.
 */
 
 import "@pancakeswap/pancake-swap-lib/contracts/token/BEP20/IBEP20.sol";
@@ -42,181 +41,220 @@ import "../../interfaces/IPancakeFactory.sol";
 import "../../interfaces/AggregatorV3Interface.sol";
 import "../../interfaces/IPriceCalculator.sol";
 import "../../library/HomoraMath.sol";
+import "../../interfaces/IZap.sol";
 
-contract PriceCalculatorBSC is IPriceCalculator, OwnableUpgradeable {
+contract PriceCalculator is IPriceCalculator, OwnableUpgradeable {
     using SafeMath for uint256;
     using HomoraMath for uint256;
 
-    address public constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
-    address public constant CAKE = 0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82;
-    address public constant BUNNY = 0xC9849E6fdB743d08fAeE3E34dd2D1bc69EA11a51;
-    address public constant VAI = 0x4BD17003473389A42DAF6a0a729f6Fdb328BbBd7;
-    address public constant BUSD = 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56;
+    address public constant BUNNY = 0x4C16f69302CcB511c5Fac682c7626B9eF0Dc126a;
+    address private constant WMATIC = 0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270;
+    address private constant QUICK = 0x831753DD7087CaC61aB5644b308642cc1c33Dc13;
+    address private constant AAVE = 0xD6DF932A45C0f255f85145f286eA0b292B21C90B;
+    address private constant ETH = 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619;
+    address private constant USDT = 0xc2132D05D31c914a87C6611C10748AEb04B58e8F;
+    address private constant USDC = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
+    address private constant BTC = 0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6;
+    address private constant DAI = 0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063;
+    address private constant SUSHI = 0x0b3F868E0BE5597D5DB7fEB59E1CADBb0fdDa50a;
+    address private constant LINK = 0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39;
+    address private constant IBBTC = 0x4EaC4c4e9050464067D673102F8E24b2FccEB350;
+    address private constant FRAX = 0x104592a158490a9228070E0A8e5343B499e125D0;
 
-    address public constant BUNNY_BNB_V1 = 0x7Bb89460599Dbf32ee3Aa50798BBcEae2A5F7f6a;
-    address public constant BUNNY_BNB_V2 = 0x5aFEf8567414F29f0f927A0F2787b188624c10E2;
-
-    IPancakeFactory private constant factory = IPancakeFactory(0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73);
-
-    uint256 private constant THRESHOLD = 5 minutes;
+    IPancakeFactory private constant factory = IPancakeFactory(0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32);
+    IPancakeFactory private constant sushiFactory = IPancakeFactory(0xc35DADB65012eC5796536bD9864eD8773aBc74C4);
+    IZap private constant zapPolygon = IZap(0x663462430834E220851a3E981D0E1199501b84F6);
 
     /* ========== STATE VARIABLES ========== */
+
+    address public keeper;
 
     mapping(address => address) private pairTokens;
     mapping(address => address) private tokenFeeds;
     mapping(address => ReferenceData) public references;
 
-    address public keeper;
-
-    /* ========== MODIFIERS ========== */
-
-    modifier onlyKeeper() {
-        require(msg.sender == keeper || msg.sender == owner(), "Qore: caller is not the owner or keeper");
-        _;
-    }
-
     /* ========== INITIALIZER ========== */
 
     function initialize() external initializer {
         __Ownable_init();
-        setPairToken(VAI, BUSD);
+
+        setPairToken(BTC, ETH);
+        setPairToken(AAVE, ETH);
+        setPairToken(USDC, ETH);
+        setPairToken(USDT, ETH);
+        setPairToken(DAI, ETH);
+        setPairToken(BUNNY, ETH);
+        setPairToken(IBBTC, BTC);
+        setPairToken(FRAX, USDC);
     }
 
-    /* ========== RESTRICTED FUNCTIONS ========== */
+    /* ========== MODIFIERS ========== */
+
+    modifier onlyKeeper() {
+        require(msg.sender == keeper || msg.sender == owner(), "PriceCalculator: caller is not the owner or keeper");
+        _;
+    }
+
+    /* ========== Restricted Operation ========== */
 
     function setKeeper(address _keeper) external onlyKeeper {
         require(_keeper != address(0), "PriceCalculatorBSC: invalid keeper address");
         keeper = _keeper;
     }
 
-    function setPairToken(address asset, address pairToken) public onlyKeeper {
+    function setPairToken(address asset, address pairToken) public onlyOwner {
         pairTokens[asset] = pairToken;
     }
 
-    function setTokenFeed(address asset, address feed) public onlyKeeper {
+    function setTokenFeed(address asset, address feed) public onlyOwner {
         tokenFeeds[asset] = feed;
     }
 
-    function setPrices(
-        address[] memory assets,
-        uint256[] memory prices,
-        uint256 timestamp
-    ) external onlyKeeper {
-        require(
-            timestamp <= block.timestamp && block.timestamp.sub(timestamp) <= THRESHOLD,
-            "PriceCalculator: invalid timestamp"
-        );
-
+    function setPrices(address[] memory assets, uint256[] memory prices) external onlyKeeper {
         for (uint256 i = 0; i < assets.length; i++) {
             references[assets[i]] = ReferenceData({lastData: prices[i], lastUpdated: block.timestamp});
         }
     }
 
-    /* ========== VIEWS ========== */
+    /* ========== Value Calculation ========== */
 
-    function priceOfBNB() public view override returns (uint256) {
-        (, int256 price, , , ) = AggregatorV3Interface(tokenFeeds[WBNB]).latestRoundData();
-        return uint256(price).mul(1e10);
-    }
-
-    function priceOfCake() public view returns (uint256) {
-        (, int256 price, , , ) = AggregatorV3Interface(tokenFeeds[CAKE]).latestRoundData();
+    function priceOfMATIC() public view override returns (uint256) {
+        (, int256 price, , , ) = AggregatorV3Interface(tokenFeeds[WMATIC]).latestRoundData();
         return uint256(price).mul(1e10);
     }
 
     function priceOfBunny() public view override returns (uint256) {
-        (, uint256 price) = valueOfAsset(BUNNY, 1e18);
-        return price;
+        (, uint256 bunnyPriceInUSD) = valueOfAsset(BUNNY, 1e18);
+        return bunnyPriceInUSD;
     }
 
-    function pricesInUSD(address[] memory assets) public view override returns (uint256[] memory) {
-        uint256[] memory prices = new uint256[](assets.length);
-        for (uint256 i = 0; i < assets.length; i++) {
-            (, uint256 valueInUSD) = valueOfAsset(assets[i], 1e18);
-            prices[i] = valueInUSD;
-        }
-        return prices;
+    function priceOfETH() public view override returns (uint256) {
+        (, int256 price, , , ) = AggregatorV3Interface(tokenFeeds[ETH]).latestRoundData();
+        return uint256(price).mul(1e10);
     }
 
-    function valueOfAsset(address asset, uint256 amount) public view override returns (uint256 valueInBNB, uint256 valueInUSD) {
-        if (asset == address(0) || asset == WBNB) {
-            return _oracleValueOf(asset, amount);
-        } else if (keccak256(abi.encodePacked(IPancakePair(asset).symbol())) == keccak256("Cake-LP")) {
+    function valueOfAsset(address asset, uint256 amount) public view override returns (uint256 valueInETH, uint256 valueInUSD) {
+        if (amount == 0) {
+            return (0, 0);
+        } else if (asset == address(0) || asset == WMATIC) {
+            return _oracleValueOf(WMATIC, amount);
+        } else if (asset == AAVE) {
+            (, int256 price, , , ) = AggregatorV3Interface(tokenFeeds[AAVE]).latestRoundData();
+            return _oracleValueOf(ETH, uint256(price));
+        } else if (
+            keccak256(abi.encodePacked(IPancakePair(asset).symbol())) == keccak256("UNI-V2") ||
+            keccak256(abi.encodePacked(IPancakePair(asset).symbol())) == keccak256("SLP")
+        ) {
             return _getPairPrice(asset, amount);
         } else {
             return _oracleValueOf(asset, amount);
         }
     }
 
-    function unsafeValueOfAsset(address asset, uint256 amount) public view returns (uint256 valueInBNB, uint256 valueInUSD) {
-        valueInBNB = 0;
+    function unsafeValueOfAsset(address asset, uint256 amount) public view returns (uint256 valueInETH, uint256 valueInUSD) {
         valueInUSD = 0;
+        valueInETH = 0;
 
-        if (asset == address(0) || asset == WBNB) {
-            valueInBNB = amount;
-            valueInUSD = amount.mul(priceOfBNB()).div(1e18);
-        } else if (keccak256(abi.encodePacked(IPancakePair(asset).symbol())) == keccak256("Cake-LP")) {
+        if (asset == ETH) {
+            valueInETH = amount;
+            valueInUSD = amount.mul(priceOfETH()).div(1e18);
+        } else if (asset == address(0) || asset == WMATIC) {
+            valueInUSD = amount.mul(priceOfMATIC()).div(1e18);
+            valueInETH = valueInUSD.mul(1e18).div(priceOfETH());
+        } else if (
+            keccak256(abi.encodePacked(IPancakePair(asset).symbol())) == keccak256("UNI-V2") ||
+            keccak256(abi.encodePacked(IPancakePair(asset).symbol())) == keccak256("SLP")
+        ) {
             if (IPancakePair(asset).totalSupply() == 0) return (0, 0);
 
             (uint256 reserve0, uint256 reserve1, ) = IPancakePair(asset).getReserves();
-            if (IPancakePair(asset).token0() == WBNB) {
-                valueInBNB = amount.mul(reserve0).mul(2).div(IPancakePair(asset).totalSupply());
-                valueInUSD = valueInBNB.mul(priceOfBNB()).div(1e18);
-            } else if (IPancakePair(asset).token1() == WBNB) {
-                valueInBNB = amount.mul(reserve1).mul(2).div(IPancakePair(asset).totalSupply());
-                valueInUSD = valueInBNB.mul(priceOfBNB()).div(1e18);
+            if (IPancakePair(asset).token0() == ETH) {
+                valueInETH = amount.mul(reserve0).mul(2).div(IPancakePair(asset).totalSupply());
+                valueInUSD = valueInETH.mul(priceOfETH()).div(1e18);
+            } else if (IPancakePair(asset).token1() == ETH) {
+                valueInETH = amount.mul(reserve1).mul(2).div(IPancakePair(asset).totalSupply());
+                valueInUSD = valueInETH.mul(priceOfETH()).div(1e18);
             } else {
-                (uint256 token0PriceInBNB, ) = valueOfAsset(IPancakePair(asset).token0(), 1e18);
-                valueInBNB = amount.mul(reserve0).mul(2).mul(token0PriceInBNB).div(1e18).div(IPancakePair(asset).totalSupply());
-                valueInUSD = valueInBNB.mul(priceOfBNB()).div(1e18);
+                (uint256 priceInETH, ) = valueOfAsset(IPancakePair(asset).token0(), 1e18);
+                if (priceInETH == 0) {
+                    (priceInETH, ) = valueOfAsset(IPancakePair(asset).token1(), 1e18);
+                    reserve1 = reserve1.mul(10**uint256(uint8(18) - IBEP20(IPancakePair(asset).token1()).decimals()));
+                    valueInETH = amount.mul(reserve1).mul(2).mul(priceInETH).div(1e18).div(IPancakePair(asset).totalSupply());
+                } else {
+                    reserve0 = reserve0.mul(10**uint256(uint8(18) - IBEP20(IPancakePair(asset).token0()).decimals()));
+                    valueInETH = amount.mul(reserve0).mul(2).mul(priceInETH).div(1e18).div(IPancakePair(asset).totalSupply());
+                }
+                valueInUSD = valueInETH.mul(priceOfETH()).div(1e18);
             }
         } else {
-            address pairToken = pairTokens[asset] == address(0) ? WBNB : pairTokens[asset];
-            address pair = factory.getPair(asset, pairToken);
+            address pairToken = pairTokens[asset] == address(0) ? WMATIC : pairTokens[asset];
+
+            address pair = zapPolygon.covers(asset) ? factory.getPair(asset, pairToken) : sushiFactory.getPair(asset, pairToken);
+            address token0 = IPancakePair(pair).token0();
+            address token1 = IPancakePair(pair).token1();
+
             if (IBEP20(asset).balanceOf(pair) == 0) return (0, 0);
 
             (uint256 reserve0, uint256 reserve1, ) = IPancakePair(pair).getReserves();
-            if (IPancakePair(pair).token0() == pairToken) {
-                valueInBNB = reserve0.mul(amount).div(reserve1);
-            } else if (IPancakePair(pair).token1() == pairToken) {
-                valueInBNB = reserve1.mul(amount).div(reserve0);
+
+            if (IBEP20(token0).decimals() < uint8(18)) {
+                reserve0 = reserve0.mul(10**uint256(uint8(18) - IBEP20(token0).decimals()));
+            }
+
+            if (IBEP20(token1).decimals() < uint8(18)) {
+                reserve1 = reserve1.mul(10**uint256(uint8(18) - IBEP20(token1).decimals()));
+            }
+
+            if (token0 == pairToken) {
+                valueInETH = reserve0.mul(amount).div(reserve1);
+            } else if (token1 == pairToken) {
+                valueInETH = reserve1.mul(amount).div(reserve0);
             } else {
                 return (0, 0);
             }
 
-            if (pairToken != WBNB) {
-                (uint256 pairValueInBNB, ) = valueOfAsset(pairToken, 1e18);
-                valueInBNB = valueInBNB.mul(pairValueInBNB).div(1e18);
+            if (pairToken != ETH) {
+                (uint256 pairValueInETH, ) = valueOfAsset(pairToken, 1e18);
+                valueInETH = valueInETH.mul(pairValueInETH).div(1e18);
             }
-            valueInUSD = valueInBNB.mul(priceOfBNB()).div(1e18);
+
+            valueInUSD = valueInETH.mul(priceOfETH()).div(1e18);
         }
     }
 
     /* ========== PRIVATE FUNCTIONS ========== */
 
-    function _getPairPrice(address pair, uint256 amount) private view returns (uint256 valueInBNB, uint256 valueInUSD) {
+    function _oracleValueOf(address asset, uint256 amount) private view returns (uint256 valueInETH, uint256 valueInUSD) {
+        valueInUSD = 0;
+        if (tokenFeeds[asset] != address(0)) {
+            (, int256 price, , , ) = AggregatorV3Interface(tokenFeeds[asset]).latestRoundData();
+            valueInUSD = uint256(price).mul(1e10).mul(amount).div(1e18);
+        } else if (references[asset].lastUpdated > block.timestamp.sub(1 days)) {
+            valueInUSD = references[asset].lastData.mul(amount).div(1e18);
+        }
+        valueInETH = valueInUSD.mul(1e18).div(priceOfETH());
+    }
+
+    function _getPairPrice(address pair, uint256 amount) private view returns (uint256 valueInETH, uint256 valueInUSD) {
         address token0 = IPancakePair(pair).token0();
         address token1 = IPancakePair(pair).token1();
         uint256 totalSupply = IPancakePair(pair).totalSupply();
         (uint256 r0, uint256 r1, ) = IPancakePair(pair).getReserves();
 
-        uint256 sqrtK = HomoraMath.sqrt(r0.mul(r1)).fdiv(totalSupply);
-        (uint256 px0, ) = _oracleValueOf(token0, 1e18);
-        (uint256 px1, ) = _oracleValueOf(token1, 1e18);
-        uint256 fairPriceInBNB = sqrtK.mul(2).mul(HomoraMath.sqrt(px0)).div(2**56).mul(HomoraMath.sqrt(px1)).div(2**56);
-
-        valueInBNB = fairPriceInBNB.mul(amount).div(1e18);
-        valueInUSD = valueInBNB.mul(priceOfBNB()).div(1e18);
-    }
-
-    function _oracleValueOf(address asset, uint256 amount) private view returns (uint256 valueInBNB, uint256 valueInUSD) {
-        valueInUSD = 0;
-        if (tokenFeeds[asset] != address(0)) {
-            (, int256 price, , , ) = AggregatorV3Interface(tokenFeeds[asset]).latestRoundData(); // chainlink
-            valueInUSD = uint256(price).mul(1e10).mul(amount).div(1e18);
-        } else if (references[asset].lastUpdated > block.timestamp.sub(1 days)) {
-            valueInUSD = references[asset].lastData.mul(amount).div(1e18);
+        if (IBEP20(token0).decimals() < uint8(18)) {
+            r0 = r0.mul(10**uint256(uint8(18) - IBEP20(token0).decimals()));
         }
-        valueInBNB = valueInUSD.mul(1e18).div(priceOfBNB());
+
+        if (IBEP20(token1).decimals() < uint8(18)) {
+            r1 = r1.mul(10**uint256(uint8(18) - IBEP20(token1).decimals()));
+        }
+
+        uint256 sqrtK = HomoraMath.sqrt(r0.mul(r1)).fdiv(totalSupply);
+        (uint256 px0, ) = valueOfAsset(token0, 1e18);
+        (uint256 px1, ) = valueOfAsset(token1, 1e18);
+        uint256 fairPriceInETH = sqrtK.mul(2).mul(HomoraMath.sqrt(px0)).div(2**56).mul(HomoraMath.sqrt(px1)).div(2**56);
+
+        valueInETH = fairPriceInETH.mul(amount).div(1e18);
+        valueInUSD = valueInETH.mul(priceOfETH()).div(1e18);
     }
 }

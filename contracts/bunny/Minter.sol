@@ -30,18 +30,20 @@ pragma solidity ^0.6.12;
 * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-* SOFTWARE.
 */
 
 import "@pancakeswap/pancake-swap-lib/contracts/token/BEP20/BEP20.sol";
 import "@pancakeswap/pancake-swap-lib/contracts/token/BEP20/SafeBEP20.sol";
 import "@pancakeswap/pancake-swap-lib/contracts/math/SafeMath.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 import "../interfaces/IBunnyMinterV2.sol";
-import "../interfaces/IBunnyPool.sol";
+import "../interfaces/IStakingRewards.sol";
 import "../interfaces/IPriceCalculator.sol";
+import "../interfaces/IPancakeRouter02.sol";
+import "../interfaces/IPancakePair.sol";
+import "../interfaces/IZap.sol";
 
-import "../zap/ZapBSC.sol";
 import "../library/SafeToken.sol";
 
 contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
@@ -50,38 +52,38 @@ contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
 
     /* ========== CONSTANTS ============= */
 
-    address public constant WBNB = 0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c;
-    address public constant BUNNY = 0xC9849E6fdB743d08fAeE3E34dd2D1bc69EA11a51;
-    address public constant BUNNY_POOL_V1 = 0xCADc8CB26c8C7cB46500E61171b5F27e9bd7889D;
-
-    address public constant FEE_BOX = 0x3749f69B2D99E5586D95d95B6F9B5252C71894bb;
-    address private constant TIMELOCK = 0x85c9162A51E03078bdCd08D4232Bab13ed414cC3;
+    address private constant TIMELOCK = 0xf36eC1522625b2eBD0b4071945F3e97134653F8f;
     address private constant DEAD = 0x000000000000000000000000000000000000dEaD;
-    address private constant DEPLOYER = 0xe87f02606911223C2Cf200398FFAF353f60801F7;
+
+    address public constant DEPLOYER = 0xbC776ac3af4D993774A54af497055170C81c113F;
+
+    address public constant BUNNY = 0x4C16f69302CcB511c5Fac682c7626B9eF0Dc126a;
+    address public constant BUNNY_ETH = 0x62052b489Cb5bC72a9DC8EEAE4B24FD50639921a;
+    address public constant BUNNY_POOL = 0x10C8CFCa4953Bc554e71ddE3Fa19c335e163D7Ac;
+    address public constant BUNNY_MAXIMIZER = 0x4Ad69DC9eA7Cc01CE13A37F20817baC4bF0De1ba;
+    IBEP20 public constant ETH = IBEP20(0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619);
+
+    IZap private constant zapPolygon = IZap(0x663462430834E220851a3E981D0E1199501b84F6);
+    IZap private constant zapSushi = IZap(0x93bCE7E49E26AF0f87b74583Ba6551DF5E4867B7);
+    IPriceCalculator private constant priceCalculator = IPriceCalculator(0xE3B11c3Bd6d90CfeBBb4FB9d59486B0381D38021);
+    address private constant quickRouter = 0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff;
+    address private constant sushiRouter = 0x1b02dA8Cb0d097eB8D57A175b88c7D8b47997506;
 
     uint256 public constant FEE_MAX = 10000;
-
-    IPriceCalculator public constant priceCalculator = IPriceCalculator(0xF5BF8A9249e3cc4cB684E3f23db9669323d4FB7d);
-    ZapBSC private constant zap = ZapBSC(0xdC2bBB0D33E0e7Dea9F5b98F46EDBaC823586a0C);
-    IPancakeRouter02 private constant router = IPancakeRouter02(0x10ED43C718714eb63d5aA57B78B54704E256024E);
 
     /* ========== STATE VARIABLES ========== */
 
     address public bunnyChef;
     mapping(address => bool) private _minters;
-    address public _deprecated_helper; // deprecated
 
     uint256 public PERFORMANCE_FEE;
     uint256 public override WITHDRAWAL_FEE_FREE_PERIOD;
     uint256 public override WITHDRAWAL_FEE;
 
-    uint256 public _deprecated_bunnyPerProfitBNB; // deprecated
-    uint256 public _deprecated_bunnyPerBunnyBNBFlip; // deprecated
+    uint256 public override bunnyPerProfitBNB;
 
     uint256 private _floatingRateEmission;
     uint256 private _freThreshold;
-
-    address public bunnyPool;
 
     /* ========== MODIFIERS ========== */
 
@@ -104,14 +106,13 @@ contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
     /* ========== INITIALIZER ========== */
 
     function initialize() external initializer {
+        __Ownable_init();
         WITHDRAWAL_FEE_FREE_PERIOD = 3 days;
         WITHDRAWAL_FEE = 50;
         PERFORMANCE_FEE = 3000;
 
-        _deprecated_bunnyPerProfitBNB = 5e18;
-        _deprecated_bunnyPerBunnyBNBFlip = 6e18;
-
-        IBEP20(BUNNY).approve(BUNNY_POOL_V1, uint256(-1));
+        IBEP20(BUNNY).approve(BUNNY_POOL, uint256(-1));
+        IBEP20(BUNNY).approve(BUNNY_MAXIMIZER, uint256(-1));
     }
 
     /* ========== RESTRICTED FUNCTIONS ========== */
@@ -157,12 +158,6 @@ contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
         _freThreshold = threshold;
     }
 
-    function setBunnyPool(address _bunnyPool) external onlyOwner {
-        IBEP20(BUNNY).approve(BUNNY_POOL_V1, 0);
-        bunnyPool = _bunnyPool;
-        IBEP20(BUNNY).approve(_bunnyPool, uint256(-1));
-    }
-
     /* ========== VIEWS ========== */
 
     function isMinter(address account) public view override returns (bool) {
@@ -172,13 +167,12 @@ contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
         return _minters[account];
     }
 
-    function amountBunnyToMint(uint256 bnbProfit) public view override returns (uint256) {
+    function amountBunnyToMint(uint256 ethProfit) public view override returns (uint256) {
+        if (priceCalculator.priceOfBunny() == 0) {
+            return 0;
+        }
         return
-            bnbProfit.mul(priceCalculator.priceOfBNB()).div(priceCalculator.priceOfBunny()).mul(floatingRateEmission()).div(1e18);
-    }
-
-    function amountBunnyToMintForBunnyBNB(uint256 amount, uint256 duration) public view override returns (uint256) {
-        return amount.mul(_deprecated_bunnyPerBunnyBNBFlip).mul(duration).div(365 days).div(1e18);
+            ethProfit.mul(priceCalculator.priceOfETH()).div(priceCalculator.priceOfBunny()).mul(floatingRateEmission()).div(1e18);
     }
 
     function withdrawalFee(uint256 amount, uint256 depositedAt) external view override returns (uint256) {
@@ -193,15 +187,15 @@ contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
     }
 
     function floatingRateEmission() public view returns (uint256) {
-        return _floatingRateEmission == 0 ? 120e16 : _floatingRateEmission;
+        return _floatingRateEmission == 0 ? 200e16 : _floatingRateEmission;
     }
 
     function freThreshold() public view returns (uint256) {
-        return _freThreshold == 0 ? 18e18 : _freThreshold;
+        return _freThreshold == 0 ? 500e18 : _freThreshold;
     }
 
     function shouldMarketBuy() public view returns (bool) {
-        return priceCalculator.priceOfBunny().mul(freThreshold()).div(priceCalculator.priceOfBNB()) < 1e18;
+        return priceCalculator.priceOfBunny().mul(freThreshold()).div(priceCalculator.priceOfETH()) < 1e18 - 1000;
     }
 
     /* ========== V1 FUNCTIONS ========== */
@@ -217,36 +211,37 @@ contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
         _transferAsset(asset, feeSum);
 
         if (asset == BUNNY) {
-            IBEP20(BUNNY).safeTransfer(DEAD, feeSum);
+            IBEP20(BUNNY).safeTransfer(TIMELOCK, feeSum);
             return;
         }
 
         bool marketBuy = shouldMarketBuy();
         if (marketBuy == false) {
-            if (asset == address(0)) {
-                // means BNB
-                SafeToken.safeTransferETH(FEE_BOX, feeSum);
-            } else {
-                IBEP20(asset).safeTransfer(FEE_BOX, feeSum);
-            }
+            uint256 bunnyETHAmount = _zapAssets(asset, feeSum, BUNNY_ETH);
+            if (bunnyETHAmount == 0) return;
+
+            IBEP20(BUNNY_ETH).safeTransfer(BUNNY_POOL, bunnyETHAmount);
+            IStakingRewards(BUNNY_POOL).notifyRewardAmount(bunnyETHAmount);
         } else {
             if (_withdrawalFee > 0) {
-                if (asset == address(0)) {
-                    // means BNB
-                    SafeToken.safeTransferETH(FEE_BOX, _withdrawalFee);
-                } else {
-                    IBEP20(asset).safeTransfer(FEE_BOX, _withdrawalFee);
-                }
+                uint256 bunnyETHAmount = _zapAssets(asset, _withdrawalFee, BUNNY_ETH);
+                if (bunnyETHAmount == 0) return;
+
+                IBEP20(BUNNY_ETH).safeTransfer(BUNNY_POOL, bunnyETHAmount);
+                IStakingRewards(BUNNY_POOL).notifyRewardAmount(bunnyETHAmount);
             }
 
             if (_performanceFee == 0) return;
 
-            _marketBuy(asset, _performanceFee, to);
+            uint256 bunnyAmount = _zapAssets(asset, _performanceFee, BUNNY);
+            IBEP20(BUNNY).safeTransfer(to, bunnyAmount);
+
             _performanceFee = _performanceFee.mul(floatingRateEmission().sub(1e18)).div(floatingRateEmission());
         }
 
-        (uint256 contributionInBNB, uint256 contributionInUSD) = priceCalculator.valueOfAsset(asset, _performanceFee);
-        uint256 mintBunny = amountBunnyToMint(contributionInBNB); 
+        (uint256 contributionInETH, uint256 contributionInUSD) = priceCalculator.valueOfAsset(asset, _performanceFee);
+
+        uint256 mintBunny = amountBunnyToMint(contributionInETH);
         if (mintBunny == 0) return;
         _mint(mintBunny, to);
 
@@ -296,16 +291,22 @@ contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
 
     /* ========== PRIVATE FUNCTIONS ========== */
 
-    function _marketBuy(
+    function _zapAssets(
         address asset,
         uint256 amount,
-        address to
-    ) private {
-        uint256 _initBunnyAmount = IBEP20(BUNNY).balanceOf(address(this));
+        address toAsset
+    ) private returns (uint256 toAssetAmount) {
+        if (asset == toAsset) return amount;
+        uint256 _initToAssetAmount = IBEP20(toAsset).balanceOf(address(this));
 
         if (asset == address(0)) {
-            zap.zapIn{value: amount}(BUNNY);
-        } else if (keccak256(abi.encodePacked(IPancakePair(asset).symbol())) == keccak256("Cake-LP")) {
+            zapPolygon.zapIn{value: amount}(toAsset);
+        } else if (
+            keccak256(abi.encodePacked(IPancakePair(asset).symbol())) == keccak256("UNI-V2") ||
+            keccak256(abi.encodePacked(IPancakePair(asset).symbol())) == keccak256("SLP")
+        ) {
+            IPancakeRouter02 router = IPancakeRouter02(_getRouterAddress(asset));
+
             if (IBEP20(asset).allowance(address(this), address(router)) == 0) {
                 IBEP20(asset).safeApprove(address(router), uint256(-1));
             }
@@ -314,11 +315,9 @@ contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
             address token0 = pair.token0();
             address token1 = pair.token1();
 
-            // burn
             if (IPancakePair(asset).balanceOf(asset) > 0) {
-                IPancakePair(asset).burn(address(zap));
+                IPancakePair(asset).burn(address(DEPLOYER));
             }
-
             (uint256 amountToken0, uint256 amountToken1) = router.removeLiquidity(
                 token0,
                 token1,
@@ -329,30 +328,46 @@ contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
                 block.timestamp
             );
 
-            if (IBEP20(token0).allowance(address(this), address(zap)) == 0) {
-                IBEP20(token0).safeApprove(address(zap), uint256(-1));
-            }
-            if (IBEP20(token1).allowance(address(this), address(zap)) == 0) {
-                IBEP20(token1).safeApprove(address(zap), uint256(-1));
-            }
-
-            if (token0 != BUNNY) {
-                zap.zapInToken(token0, amountToken0, BUNNY);
-            }
-
-            if (token1 != BUNNY) {
-                zap.zapInToken(token1, amountToken1, BUNNY);
-            }
+            _tokenToAsset(token0, amountToken0, toAsset);
+            _tokenToAsset(token1, amountToken1, toAsset);
         } else {
-            if (IBEP20(asset).allowance(address(this), address(zap)) == 0) {
-                IBEP20(asset).safeApprove(address(zap), uint256(-1));
+            // default. zap single asset to other asset in quickswap
+            if (IBEP20(asset).allowance(address(this), address(zapPolygon)) == 0) {
+                IBEP20(asset).safeApprove(address(zapPolygon), uint256(-1));
             }
 
-            zap.zapInToken(asset, amount, BUNNY);
+            zapPolygon.zapInToken(asset, amount, toAsset);
         }
 
-        uint256 bunnyAmount = IBEP20(BUNNY).balanceOf(address(this)).sub(_initBunnyAmount);
-        IBEP20(BUNNY).safeTransfer(to, bunnyAmount);
+        toAssetAmount = IBEP20(toAsset).balanceOf(address(this)).sub(_initToAssetAmount);
+    }
+
+    function _tokenToAsset(
+        address _token,
+        uint256 _amount,
+        address _toAsset
+    ) private {
+        if (zapPolygon.covers(_token)) {
+            if (_token != _toAsset) {
+                if (IBEP20(_token).allowance(address(this), address(zapPolygon)) == 0) {
+                    IBEP20(_token).safeApprove(address(zapPolygon), uint256(-1));
+                }
+
+                zapPolygon.zapInToken(_token, _amount, _toAsset);
+            }
+        } else {
+            if (IBEP20(_token).allowance(address(this), address(zapSushi)) == 0) {
+                IBEP20(_token).safeApprove(address(zapSushi), uint256(-1));
+            }
+
+            uint256 initETHBalance = ETH.balanceOf(address(this));
+            zapSushi.zapInToken(_token, _amount, address(ETH));
+
+            if (ETH.allowance(address(this), address(zapPolygon)) == 0) {
+                ETH.safeApprove(address(zapPolygon), uint256(-1));
+            }
+            zapPolygon.zapInToken(address(ETH), ETH.balanceOf(address(this)).sub(initETHBalance), _toAsset);
+        }
     }
 
     function _transferAsset(address asset, uint256 amount) private {
@@ -374,10 +389,12 @@ contract BunnyMinterV2 is IBunnyMinterV2, OwnableUpgradeable {
 
         uint256 bunnyForDev = amount.mul(15).div(100);
         tokenBUNNY.mint(bunnyForDev);
-        if (bunnyPool == address(0)) {
-            tokenBUNNY.transfer(DEPLOYER, bunnyForDev);
-        } else {
-            IBunnyPool(bunnyPool).depositOnBehalf(bunnyForDev, DEPLOYER);
-        }
+        IStakingRewards(BUNNY_MAXIMIZER).stakeTo(bunnyForDev, DEPLOYER);
+    }
+
+    function _getRouterAddress(address asset) private pure returns (address _routerAddress) {
+        _routerAddress = keccak256(abi.encodePacked(IPancakePair(asset).symbol())) == keccak256("SLP")
+            ? sushiRouter
+            : quickRouter;
     }
 }
